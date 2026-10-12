@@ -77,18 +77,20 @@ type dnsPolicy struct {
 	Weight       *int   `json:"weight,omitempty"`
 }
 
+func (p dnsPolicy) listingID() string { return p.ID }
+
 // policyMetadata carries the console's provenance for a policy.
 type policyMetadata struct {
 	Origin string `json:"origin"`
 }
 
-// page is the Integration API's list envelope. TotalCount is a pointer and
+// page is the Integration API's list envelope. Counts and offsets are pointers and
 // Data is left nil by encoding/json when absent (an empty JSON array decodes
 // to a non-nil empty slice), so listAll can tell a missing field from zero.
 type page[T any] struct {
-	Offset     int  `json:"offset"`
+	Offset     *int `json:"offset"`
 	Limit      int  `json:"limit"`
-	Count      int  `json:"count"`
+	Count      *int `json:"count"`
 	TotalCount *int `json:"totalCount"`
 	Data       []T  `json:"data"`
 }
@@ -103,6 +105,12 @@ type site struct {
 	ID                string `json:"id"`
 	InternalReference string `json:"internalReference"`
 	Name              string `json:"name"`
+}
+
+func (s site) listingID() string { return s.ID }
+
+type listEntry interface {
+	listingID() string
 }
 
 // applicationInfo is the GET /info response.
@@ -399,10 +407,12 @@ func (c *Client) DeleteDNSPolicy(ctx context.Context, siteID, policyID string) e
 // listAll pages through a list endpoint until every item has been fetched.
 // Any response that cannot be trusted to complete the listing — a page
 // without data or totalCount, an empty page before totalCount is reached, a
-// totalCount that changes between pages, or more items than totalCount —
+// totalCount that changes between pages, inconsistent offsets/counts, missing
+// or repeated ids, or more items than totalCount —
 // fails with errIncompleteListing rather than returning a partial result.
-func listAll[T any](ctx context.Context, c *Client, path string) ([]T, error) {
+func listAll[T listEntry](ctx context.Context, c *Client, path string) ([]T, error) {
 	var items []T
+	seen := make(map[string]struct{})
 	offset := 0
 	total := -1
 
@@ -422,6 +432,10 @@ func listAll[T any](ctx context.Context, c *Client, path string) ([]T, error) {
 		}
 
 		switch {
+		case p.Offset == nil || p.Count == nil:
+			return nil, fmt.Errorf("%w: page at offset %d has no offset or count", errIncompleteListing, offset)
+		case *p.Offset != offset || *p.Count != len(p.Data):
+			return nil, fmt.Errorf("%w: page position or count does not match the request and data", errIncompleteListing)
 		case p.Data == nil || p.TotalCount == nil:
 			return nil, fmt.Errorf("%w: page at offset %d has no data or totalCount", errIncompleteListing, offset)
 		case *p.TotalCount < 0:
@@ -435,13 +449,26 @@ func listAll[T any](ctx context.Context, c *Client, path string) ([]T, error) {
 			return nil, fmt.Errorf("%w: empty page at offset %d of %d", errIncompleteListing, offset, total)
 		}
 
+		if len(p.Data) > total-offset {
+			return nil, fmt.Errorf("%w: page contains more items than the remaining totalCount", errIncompleteListing)
+		}
+		for _, item := range p.Data {
+			id := item.listingID()
+			if !validID(id) {
+				return nil, fmt.Errorf("%w: page contains a missing or invalid id", errIncompleteListing)
+			}
+			// UUID spelling is case-insensitive; preserve the returned id for requests.
+			key := strings.ToLower(id)
+			if _, exists := seen[key]; exists {
+				return nil, fmt.Errorf("%w: page contains a repeated id", errIncompleteListing)
+			}
+			seen[key] = struct{}{}
+		}
+
 		items = append(items, p.Data...)
 		offset += len(p.Data)
 
-		switch {
-		case offset > total:
-			return nil, fmt.Errorf("%w: received %d items, totalCount is %d", errIncompleteListing, offset, total)
-		case offset == total:
+		if offset == total {
 			return items, nil
 		}
 	}

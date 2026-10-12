@@ -112,6 +112,9 @@ const (
 	unifiListEmptyLaterPage
 	// unifiListEmptyObject answers with a bare {} body.
 	unifiListEmptyObject
+	// Replayed pages can retain their original offset or echo the request.
+	unifiListRepeatedPage
+	unifiListRepeatedPageEchoOffset
 )
 
 type fakeUniFiAPI struct {
@@ -272,6 +275,15 @@ func (f *fakeUniFiAPI) handler() http.Handler {
 		case fault == unifiListEmptyFirstPage, fault == unifiListEmptyLaterPage && offset > 0:
 			writeUniFiJSON(w, http.StatusOK, map[string]any{
 				"offset": offset, "limit": pageSize, "count": 0, "totalCount": len(items), "data": []fakeUniFiPolicy{},
+			})
+		case offset > 0 && (fault == unifiListRepeatedPage || fault == unifiListRepeatedPageEchoOffset):
+			returnedOffset := 0
+			if fault == unifiListRepeatedPageEchoOffset {
+				returnedOffset = offset
+			}
+			count := min(pageSize, len(items))
+			writeUniFiJSON(w, http.StatusOK, map[string]any{
+				"offset": returnedOffset, "limit": pageSize, "count": count, "totalCount": len(items), "data": items[:count],
 			})
 		default:
 			writeUniFiPage(w, r, items, pageSize)
@@ -704,6 +716,8 @@ func TestReconcile_UniFiIncompleteListingStopsReconciliation(t *testing.T) {
 		{"empty page before totalCount", unifiListEmptyLaterPage},
 		{"empty first page with nonzero totalCount", unifiListEmptyFirstPage},
 		{"empty object body", unifiListEmptyObject},
+		{"repeated page with original offset", unifiListRepeatedPage},
+		{"repeated page with requested offset", unifiListRepeatedPageEchoOffset},
 	}
 
 	for _, tt := range tests {

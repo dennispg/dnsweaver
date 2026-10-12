@@ -116,6 +116,9 @@ UniFi's Integration API supports TXT records, so dnsweaver uses its standard `_d
 !!! note "TXT values and commas"
     The Integration API requires TXT text containing commas to be enclosed in double quotes. Every dnsweaver ownership value contains commas, so dnsweaver quotes on write and unquotes on read. You will see the quotes if you inspect the record in the console; that is expected. One value cannot be represented losslessly: TXT text that both contains a comma and is itself wrapped in double quotes. dnsweaver rejects that value with a clear error rather than storing it ambiguously.
 
+!!! note "Incomplete listings"
+    Missing page fields, inconsistent offsets or counts, and missing or repeated policy IDs fail the listing. dnsweaver returns an error instead of using a partial record set. Reconciliation can resume when the controller returns a valid listing. These checks do not make offset pagination an atomic snapshot during concurrent changes.
+
 ## Recommended Mode Configuration
 
 ```yaml

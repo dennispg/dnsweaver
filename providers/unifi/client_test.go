@@ -273,12 +273,14 @@ func (f *fakeController) writePage(w http.ResponseWriter, r *http.Request, items
 		end := min(offset+limit, len(list))
 		start := min(offset, end)
 		total, data := len(list), append([]site{}, list[start:end]...) // [] rather than null, as the console sends
-		f.writeJSON(w, http.StatusOK, page[site]{Offset: offset, Limit: limit, Count: end - start, TotalCount: &total, Data: data})
+		count := end - start
+		f.writeJSON(w, http.StatusOK, page[site]{Offset: &offset, Limit: limit, Count: &count, TotalCount: &total, Data: data})
 	case []dnsPolicy:
 		end := min(offset+limit, len(list))
 		start := min(offset, end)
 		total, data := len(list), append([]dnsPolicy{}, list[start:end]...) // [] rather than null, as the console sends
-		f.writeJSON(w, http.StatusOK, page[dnsPolicy]{Offset: offset, Limit: limit, Count: end - start, TotalCount: &total, Data: data})
+		count := end - start
+		f.writeJSON(w, http.StatusOK, page[dnsPolicy]{Offset: &offset, Limit: limit, Count: &count, TotalCount: &total, Data: data})
 	default:
 		f.t.Fatalf("writePage: unsupported item type %T", items)
 	}
@@ -488,6 +490,26 @@ func TestClient_ListDNSPolicies_Incomplete(t *testing.T) {
 			`{"offset":1,"limit":200,"count":1,"totalCount":3,"data":[` + policy + `]}`,
 		}},
 		{name: "more items than totalCount", pages: []string{`{"offset":0,"limit":200,"count":2,"totalCount":1,"data":[` + policy + `,` + policy + `]}`}},
+		{name: "missing offset", pages: []string{`{"limit":200,"count":1,"totalCount":1,"data":[` + policy + `]}`}},
+		{name: "null offset", pages: []string{`{"offset":null,"limit":200,"count":1,"totalCount":1,"data":[` + policy + `]}`}},
+		{name: "wrong offset", pages: []string{`{"offset":1,"limit":200,"count":1,"totalCount":1,"data":[` + policy + `]}`}},
+		{name: "missing count", pages: []string{`{"offset":0,"limit":200,"totalCount":1,"data":[` + policy + `]}`}},
+		{name: "null count", pages: []string{`{"offset":0,"limit":200,"count":null,"totalCount":1,"data":[` + policy + `]}`}},
+		{name: "wrong count", pages: []string{`{"offset":0,"limit":200,"count":0,"totalCount":1,"data":[` + policy + `]}`}},
+		{name: "missing policy id", pages: []string{`{"offset":0,"limit":200,"count":1,"totalCount":1,"data":[{"type":"A_RECORD"}]}`}},
+		{name: "duplicate id within page", pages: []string{`{"offset":0,"limit":200,"count":2,"totalCount":2,"data":[` + policy + `,` + policy + `]}`}},
+		{name: "repeated page with original offset", pages: []string{
+			`{"offset":0,"limit":200,"count":1,"totalCount":2,"data":[` + policy + `]}`,
+			`{"offset":0,"limit":200,"count":1,"totalCount":2,"data":[` + policy + `]}`,
+		}},
+		{name: "repeated page with requested offset", pages: []string{
+			`{"offset":0,"limit":200,"count":1,"totalCount":2,"data":[` + policy + `]}`,
+			`{"offset":1,"limit":200,"count":1,"totalCount":2,"data":[` + policy + `]}`,
+		}},
+		{name: "repeated UUID with different casing", pages: []string{
+			`{"offset":0,"limit":200,"count":1,"totalCount":2,"data":[` + strings.ReplaceAll(policy, "00000000-0000-4000-8000-000000000001", testSiteID) + `]}`,
+			`{"offset":1,"limit":200,"count":1,"totalCount":2,"data":[` + strings.ReplaceAll(policy, "00000000-0000-4000-8000-000000000001", strings.ToUpper(testSiteID)) + `]}`,
+		}},
 	}
 
 	for _, tt := range tests {
@@ -514,6 +536,26 @@ func TestClient_ListDNSPolicies_Incomplete(t *testing.T) {
 			}
 			if policies != nil {
 				t.Errorf("partial result returned alongside the error: %d policies", len(policies))
+			}
+		})
+	}
+}
+
+func TestClient_ResolveSiteID_IncompleteIDs(t *testing.T) {
+	for _, id := range []string{"", testSiteID, strings.ToUpper(testSiteID)} {
+		t.Run("second_id_"+id, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+				returnedID := testSiteID
+				if offset > 0 {
+					returnedID = id
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"offset":%d,"limit":200,"count":1,"totalCount":2,"data":[{"id":%q,"internalReference":"default"}]}`, offset, returnedID)
+			}))
+			t.Cleanup(server.Close)
+			if _, err := NewClient(server.URL, testAPIKey).ResolveSiteID(context.Background(), "default"); !errors.Is(err, errIncompleteListing) {
+				t.Fatalf("incomplete sites listing returned %v, want errIncompleteListing", err)
 			}
 		})
 	}
